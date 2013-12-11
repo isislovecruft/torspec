@@ -782,7 +782,7 @@ see tor-design.pdf.
          Onion skin                    [TAP_C_HANDSHAKE_LEN bytes]
          Identity fingerprint          [HASH_LEN bytes]
 
-   The "legacy identity" and "identity fingerprint fields are the SHA1
+   The "legacy identity" and "identity fingerprint" fields are the SHA1
    hash of the PKCS#1 ASN1 encoding of the next onion router's identity
    (signing) key.  (See 0.3 above.)  Including this hash allows the
    extending OR verify that it is indeed connected to the correct target
