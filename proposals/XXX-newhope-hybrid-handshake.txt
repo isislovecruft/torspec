@@ -1,0 +1,388 @@
+Filename: XXX-newhope-hybrid-handshake.txt
+Title: Post-Quantum Secure Hybrid Handshake Based on NewHope
+Author: Isis Lovecruft, Peter Schwabe
+Created: 16 Apr 2016
+Updated: 16 Apr 2016
+Status: Draft
+Depends: prop#220 prop#249
+
+§0. Introduction
+
+  NewHope is a post-quantum secure key exchange lattice-based protocol based
+  on the ring-learning-with-errors (Ring-LWE) problem.  We propose a hybrid
+  handshake for Tor, based on a combination of Tor's current NTor handshake
+  and a shared key derived through a NewHope ephemeral key exchange.
+
+  For further details on the NewHope key exchange, the reader is referred to
+  "Post-quantum key exchange - a new hope" by Alkim, Ducas, Pöppelmann, and
+  Schwabe. [0]
+
+  For the purposes of brevity, we consider that NTor is currently the only
+  handshake protocol in Tor; the older TAP protocol is ignored completely, due
+  to the fact that it is currently deprecated and nearly entirely unused.
+
+§1. Motivation
+
+  An attacker currently monitoring and storing circuit-layer NTor handshakes
+  who later has the ability to run Shor's algorithm on a quantum computer will
+  be able to break Tor's current handshake protocol and decrypt previous
+  communications.
+
+  [XXX maybe write some more high-scare-factor cruft here. --isis]
+
+§2. Design
+
+  A client and server, in parallel, conduct do two hanshakes:
+
+  - An X25519 key exchange, as described in the description of the NTor
+    handshake in Tor proposal #216.
+  - A NewHope key exchange.
+
+  The shared keys derived from these two handshakes are then concatenated and
+  used as input to the SHAKE-128 extendable output function (XOF), as decribed
+  in FIPS-PUB-202, [1] in order to produce a shared key.
+
+
+§3. Specification
+
+§3.1. Notation
+
+  Let `a || b` be the concatenation of a with b.
+
+  Let `H(x)` be the 32-byte output of the SHA3-256 hash digest function (as
+  described in FIPS-PUB-202) applied to message x.
+
+  Let X25519 refer to the curve25519-based key agreement protocol described
+  in RFC7748 §6.1. [2]
+
+  Let `EXP(a, b) == X25519(., b, a)` with `g == 9`.  Let X25519_KEYGEN() do
+  the appropriate manipulations when generating the secret key (clearing the
+  low bits, twidding the high bits).
+  [XXX maybe match RFC7748 notation more. --isis]
+
+  Let `X25519_KEYID(B) == B` where B is a valid X25519 public key.
+
+  When representing an element of the Curve25519 subgroup as a byte string,
+  use the standard (32-byte, little-endian, x-coordinate-only) representation
+  for Curve25519 points.
+
+  Let `ID` be a router's identity key taken from the router microdescriptor.
+  In the case for relays possessing Ed25519 identity keys (c.f. Tor proposal
+  #220), this is a 32-byte string reprsenting the public Ed25519 identity key.
+  For backwards and forwards compatibility with routers which do not possess
+  Ed25519 identity keys, this is a 32-byte string created via the output of
+  SHA-3-256(X), where the message X is the router's public identity key.
+
+
+  ID_LENGTH      [32 bytes]
+  H_LENGTH       [32 bytes]
+  G_LENGTH       [32 bytes]
+
+
+  PROTOID  :=    "pqtor-x25519-newhope-sha3256-1"
+  T_MAC    :=    PROTOID || ":mac"
+  T_KEY    :=    PROTOID || ":key_extract"
+  T_VERIFY :=    PROTOID || ":verify"
+
+
+§3.2. Protocol
+
+§3.2.1. The NTor Handshake
+
+  Take a router with identity ID.
+
+  As setup, the router generates a secret key b, and a public onion key B with
+  b, B = X25519_KEYGEN().  The router publishes B in its server descriptor in
+  the "ntor-onion-key" entry.
+
+  To send a create cell, the client generates a keypair x, X = X25519_KEYGEN(),
+  and creates the NTor portion of a CREATE2V cell's HDATA section:
+
+    CLIENT_NTOR    := ID || B || X                   [96 bytes]
+    CLIENT_NEWHOPE                                   [1824 bytes]  (see §3.2.2)
+    CLIENT_HDATA   := CLIENT_NTOR || CLIENT_NEWHOPE  [1920 bytes]
+
+  The client then concatenates CLIENT_NTOR with CLIENT_NEWHOPE (see §3.2.2),
+  to create CLIENT_HDATA, and creates and sends a CREATE2V cell (see §3.2.3.1)
+  to the server.  If the server does not respond with a CREATED2V cell, the
+  client SHOULD NOT attempt to extend the circuit through that server by
+  sending fragmented EXTEND2 cells, since the server does not have support for
+  CREATE2V cells.
+
+  The server generates a keypair of y, Y = X25519_KEYGEN(), and computes
+
+    secret_input = EXP(X, y) || EXP(X, b) || ID || B || X || Y || PROTOID
+    KEY_SEED = H(secret_input, t_key)
+    verify = H(secret_input, t_verify)
+    auth_input = verify || ID || B || Y || X || PROTOID | "Server"
+
+  The server sends a CREATED2V cell containing:
+
+    SERVER_PK := Y                                  [G_LENGTH bytes]
+    AUTH      := H(auth_input, t_mac)                [H_LENGTH bytes]
+
+  The client then checks Y is in G^* [see NOTE below], and computes
+
+    secret_input = EXP(Y,x) || EXP(B,x) || ID || B || X || Y || PROTOID
+    KEY_SEED = H(secret_input, t_key)
+    verify = H(secret_input, t_verify)
+    auth_input = verify || ID || B || Y || X || PROTOID || "Server"
+
+  The client verifies that AUTH == H(auth_input, t_mac).
+
+  Both parties check that none of the EXP() operations produced the point at
+  infinity. [NOTE: This is an adequate replacement for checking Y for group
+  membership, if the group is curve25519.]
+
+  Both parties now have a shared value for KEY_SEED.  They expand this into
+  the keys needed for the Tor relay protocol.
+
+
+
+§3.2.2. The NewHope Handshake
+
+    X25519_SK    [32 Bytes]
+    X25519_PK    [32 Bytes]
+    X25519_KEY   [32 Bytes]
+
+    NEWHOPE_POLY [1792 Bytes]
+    NEWHOPE_SEED [32 Bytes]
+    NEWHOPE_REC  [256 Bytes]
+    NEWHOPE_KEY  [32 Bytes]
+
+    NEWHOPE_MSGA = (NEWHOPE_POLY|NEWHOPE_SEED)
+    NEWHOPE_MSGB = (NEWHOPE_POLY|NEWHOPE_REC)
+
+
+    X25519_KEYGEN():                     returns an X25519 keypair of type
+                                         (X25519_SK, X25519_PK)
+
+    X25519_SHARED(X25519_PK, X25519_SK): computes an X25519 shared key
+                                         of type X25519_KEY
+
+    NEWHOPE_KEYGEN():                    returns a Newhope keypair of type
+                                         (NEWHOPE_POLY, NEWHOPE_MSGA)
+
+    NEWHOPE_SHAREDB(NEWHOPE_MSGA):       returns a tuple of type
+                                         (NEWHOPE_MSGB,NEWHOPE_KEY)
+
+    NEWHOPE_SHAREDA(NEWHOPE_MSGB,NEWHOPE_POLY): returns a shared key NEWHOPE_KEY
+
+
+
+
+
+  ========================================================================
+
+  Alice                                      Bob
+
+
+
+  x, X = X25519_KEYGEN()
+  a, A = NEWHOPE_KEYGEN()
+
+  MA = X|A                  ----- MA ----->
+                                             y,Y  = X25519_KEYGEN()
+                                             xk   = X25519_SHARED(N,y)
+                                             M,nk = NEWHOPE_SHAREDB(X)
+                                             MB   = Y,M
+                                             k    = H(xk|nk)
+
+                            <---- MB ------
+
+  xk = X25519_SHARED(Y,x)
+  nk = NEWHOPE_SHAREDA(M,a)
+  k  = H(xk,ak)
+
+
+
+  ========================================================================
+
+  --- Parameters and mathematical structures ---
+
+  n = 1024
+  q = 12289
+  Zq = Z/qZ
+  Rq = Zq[X]/(x^n+1)
+
+  --- Internal types ---
+
+  poly: element of Rq
+
+
+  --- Internal functions ---
+
+  gen_a(NEWHOPE_SEED):    returns a uniformly random poly
+  sample_noise():         returns a poly (sampled from a centered binomial)
+  NTT(poly):              number-theoretic transform; returns a poly
+  INVNTT(poly):           inverse number-theoretic transform; returns a poly
+  pw(poly, poly):         pointwise multiplication; returns a poly
+  pack(poly):             packs a poly to a NEWHOPE_POLY byte array
+  unpack(NEWHOPE_POLY):   unpacks a NEWHOPE_POLY byte array to a poly
+
+  helprec(poly):          returns a NEWHOPE_REC byte array
+  rec(poly, NEWHOPE_REC): returns a NEWHOPE_KEY
+
+
+  --- High-level description of Newhope API functions ---
+
+
+  NEWHOPE_KEYGEN():
+    seed = randombytes(32) //XXX: how do we want to handle this seed?
+    seed = H(seed)
+    a    = gen_a(seed)
+    s    = sample_noise()
+    e    = sample_noise()
+    st   = NTT(s)
+    bt   = pw(a,s) + NTT(e)
+    sbt  = pack(bt)
+    return (pack(ts),sbt|seed)
+
+
+  NEWHOPE_SHAREDB(NEWHOPE_MSGA sbt|seed):
+    s'   = sample_noise()
+    e'   = sample_noise()
+    e"   = sample_noise()
+    bt   = unpack(sbt)
+    a    = gen_a(seed)
+    ts'  = NTT(s')
+    tu   = pw(a,ts') + NTT(e')
+    v    = INVNTT(pw(bt,ts')) + e"
+    r    = helprec(v)
+    k    = rec(v,r)
+    stu  = pack(tu)
+    return (stu|r,k)
+
+
+  NEWHOPE_SHAREDA(NEWHOPE_MSGB stu|r, NEWHOPE_POLY p):
+    tu   = unpack(stu)
+    ts   = unpack(p)
+    v'   = INVNTT(pw(tu,ts))
+    k    = rec(v',r)
+    return k
+
+
+
+
+  When a client uses a SEND_A within a CREATE cell, the client SHOULD NOT use
+  that SEND_A in any other CREATE or EXTEND cells.
+
+
+§3.2.3. Cell Formats
+
+
+§3.2.3.1. CREATE2V Cells
+
+   The client portion of the handshake should send CLIENT_HDATA, formatted
+   into a CREATE2V cell, where the latter is fragmented into four EXTEND2
+   cells as follows:
+
+
+      IGNORED := 0x00                                       [100 bytes]
+
+    XXX i think we want an extendable CREATE2V from OPs? then OR-to-OR EXTEND2s?
+    XXXXisis
+
+
+§3.2.3.2. CREATED2V Cells
+
+
+§3.2.3.3. Fragmented EXTEND2 Cells
+
+  When the client wishes to extend a circuit, the client should fragment
+  CLIENT_HDATA into four EXTEND2 cells:
+
+    EXTEND2 {
+      NSPEC := 0x02 {                                     [1 byte]
+        LINK_ID_SERVER                                    [22 bytes] XXX
+        LINK_ADDRESS_SERVER                               [8 bytes]  XXX
+      }
+      HTYPE := 0x0003                                     [2 bytes]
+      HLEN  := 0x0780                                     [2 bytes]
+      HDATA := CLIENT_HDATA[0,461]                        [462 bytes]
+    }
+    EXTEND2 {
+      NSPEC := 0x00                                       [1 byte]
+      HTYPE := 0xFFFF                                     [2 bytes]
+      HLEN  := 0x0000                                     [2 bytes]
+      HDATA := CLIENT_HDATA[462,954]                      [492 bytes]
+    }
+    EXTEND2 {
+      NSPEC := 0x00                                       [1 byte]
+      HTYPE := 0xFFFF                                     [2 bytes]
+      HLEN  := 0x0000                                     [2 bytes]
+      HDATA := CLIENT_HDATA[955,1447]                     [492 bytes]
+    }
+    EXTEND2 {
+      NSPEC := 0x00                                       [1 byte]
+      HTYPE := 0xFFFF                                     [2 bytes]
+      HLEN  := 0x0000                                     [2 bytes]
+      HDATA := CLIENT_HDATA[1448,1919]                    [472 bytes]
+    }
+
+
+  The client sends this to the server to extend the circuit from, and that
+  server should format the fragmented EXTEND2 cells into a CREATE2V cell, as
+  described in §3.2.3.1.
+
+§3.2.3.4. Fragmented EXTENDED2 Cells
+
+
+3.2.x. Key Expansion
+
+  The client and server derive a shared key by:
+
+    SHAKE_128(NewHopeKey || NTorKey)
+
+
+
+4. Security & Anonymity Implications
+
+  This handshake protocol is one-way authenticated.  That is, the server is
+  authenticated, while the client remains anonymous.
+
+
+
+5. Compatibility
+
+  Because our proposal requires both the client and server to send more than
+  the 505 bytes possible within a CREATE2 cell's HDATA section, it depends
+  upon the implementation of a mechanism for allowing larger CREATE cells
+  (c.f. Tor proposal #249).
+
+  We reserve the following handshake type for use in CREATE2V/CREATED2V and
+  EXTEND2V/EXTENDED2V cells:
+
+    0x0003            [NEWHOPE + X25519 HYBRID HANDSHAKE]
+
+  [XXX finish --isis]
+
+  There are no additional entries or changes required within either router
+  descriptors or microdescriptors to support this handshake method, due to the
+  NewHope keys being ephemeral and derived on-the-fly, and due to the NTor X25519
+  public keys already being in included within the "ntor-onion-key" entry.
+
+  Add a "UseNewHopeKEX" configuration option and a corresponding consensus
+  parameter to control whether clients prefer using this NewHope hybrid
+  handshake or some previous handshake protocol.  If the configuration option
+  is "auto", clients SHOULD obey the consensus parameter.  The default
+  configuration SHOULD be "auto" and the consensus value SHOULD initially be "0".
+
+
+
+6. Implementation
+
+
+
+7. Performance & Scalability
+
+  [XXX implement with the newhope refc code and take benchmarks for
+  inclusion. -isis]
+
+
+
+8. References
+
+[0]: https://cryptojedi.org/papers/newhope-20160328.pdf https://cryptojedi.org/crypto/#newhope
+[1]: http://www.nist.gov/customcf/get_pdf.cfm?pub_id=919061
+[2]: https://tools.ietf.org/html/rfc7748#section-6.1
