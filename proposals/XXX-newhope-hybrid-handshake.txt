@@ -21,6 +21,7 @@ Depends: prop#220 prop#249
   handshake protocol in Tor; the older TAP protocol is ignored completely, due
   to the fact that it is currently deprecated and nearly entirely unused.
 
+
 §1. Motivation
 
   An attacker currently monitoring and storing circuit-layer NTor handshakes
@@ -29,6 +30,7 @@ Depends: prop#220 prop#249
   communications.
 
   [XXX maybe write some more high-scare-factor cruft here. --isis]
+
 
 §2. Design
 
@@ -39,7 +41,7 @@ Depends: prop#220 prop#249
   - A NewHope key exchange.
 
   The shared keys derived from these two handshakes are then concatenated and
-  used as input to the SHAKE-128 extendable output function (XOF), as decribed
+  used as input to the SHAKE-256 extendable output function (XOF), as decribed
   in FIPS-PUB-202, [1] in order to produce a shared key.
 
 
@@ -118,12 +120,15 @@ Depends: prop#220 prop#249
 
   The server sends a CREATED2V cell containing:
 
-    SERVER_PK := Y                                  [G_LENGTH bytes]
-    AUTH      := H(auth_input, t_mac)                [H_LENGTH bytes]
+    SERVER_PK      := Y                              [G_LENGTH bytes]
+    AUTH           := H(auth_input, t_mac)           [H_LENGTH bytes]
+    SERVER_NTOR    := SERVER_PK || AUTH              [64 bytes]
+    SERVER_NEWHOPE                                   [2048 bytes]  (see §3.2.2)
+    SERVER_HDATA   := SERVER_NTOR || SERVER_NEWHOPE  [2112 bytes]
 
   The client then checks Y is in G^* [see NOTE below], and computes
 
-    secret_input = EXP(Y,x) || EXP(B,x) || ID || B || X || Y || PROTOID
+    secret_input = EXP(Y, x) || EXP(B, x) || ID || B || X || Y || PROTOID
     KEY_SEED = H(secret_input, t_key)
     verify = H(secret_input, t_verify)
     auth_input = verify || ID || B || Y || X || PROTOID || "Server"
@@ -137,6 +142,7 @@ Depends: prop#220 prop#249
   Both parties now have a shared value for KEY_SEED.  They expand this into
   the keys needed for the Tor relay protocol.
 
+  [XXX i think we want to save the final hashing here. --isis]
 
 
 §3.2.2. The NewHope Handshake
@@ -150,8 +156,8 @@ Depends: prop#220 prop#249
     NEWHOPE_REC  [256 Bytes]
     NEWHOPE_KEY  [32 Bytes]
 
-    NEWHOPE_MSGA = (NEWHOPE_POLY|NEWHOPE_SEED)
-    NEWHOPE_MSGB = (NEWHOPE_POLY|NEWHOPE_REC)
+    NEWHOPE_MSGA = (NEWHOPE_POLY||NEWHOPE_SEED)
+    NEWHOPE_MSGB = (NEWHOPE_POLY||NEWHOPE_REC)
 
 
     X25519_KEYGEN():                     returns an X25519 keypair of type
@@ -181,22 +187,27 @@ Depends: prop#220 prop#249
   x, X = X25519_KEYGEN()
   a, A = NEWHOPE_KEYGEN()
 
-  MA = X|A                  ----- MA ----->
+  MA = X||A                 ----- MA ----->
                                              y,Y  = X25519_KEYGEN()
                                              xk   = X25519_SHARED(N,y)
                                              M,nk = NEWHOPE_SHAREDB(X)
                                              MB   = Y,M
-                                             k    = H(xk|nk)
+                                             k    = H(xk||nk)
 
                             <---- MB ------
 
   xk = X25519_SHARED(Y,x)
   nk = NEWHOPE_SHAREDA(M,a)
-  k  = H(xk,ak)
+  k  = H(xk,nk)
 
+  ========================================================================
+  For a description X25519 see XXX
 
 
   ========================================================================
+
+  Description of Newhope, see also https://cryptojedi.org/papers/#newhope and
+  (for reference code) https://cryptojedi.org/crypto/#newhope
 
   --- Parameters and mathematical structures ---
 
@@ -236,10 +247,10 @@ Depends: prop#220 prop#249
     st   = NTT(s)
     bt   = pw(a,s) + NTT(e)
     sbt  = pack(bt)
-    return (pack(ts),sbt|seed)
+    return (pack(ts),sbt||seed)
 
 
-  NEWHOPE_SHAREDB(NEWHOPE_MSGA sbt|seed):
+  NEWHOPE_SHAREDB(NEWHOPE_MSGA sbt||seed):
     s'   = sample_noise()
     e'   = sample_noise()
     e"   = sample_noise()
@@ -251,10 +262,10 @@ Depends: prop#220 prop#249
     r    = helprec(v)
     k    = rec(v,r)
     stu  = pack(tu)
-    return (stu|r,k)
+    return (stu||r,k)
 
 
-  NEWHOPE_SHAREDA(NEWHOPE_MSGB stu|r, NEWHOPE_POLY p):
+  NEWHOPE_SHAREDA(NEWHOPE_MSGB stu||r, NEWHOPE_POLY p):
     tu   = unpack(stu)
     ts   = unpack(p)
     v'   = INVNTT(pw(tu,ts))
@@ -263,29 +274,261 @@ Depends: prop#220 prop#249
 
 
 
+  --- Description of the Newhope internal functions ---
 
-  When a client uses a SEND_A within a CREATE cell, the client SHOULD NOT use
-  that SEND_A in any other CREATE or EXTEND cells.
+  gen_a(NEWHOPE_SEED seed) receives as input a 32-bit (public) seed.  It expands
+  this seed through SHAKE-128 from the FIPS202 standard. The output of SHAKE-128
+  is considered a sequence of 16-bit little-endian integers. This sequence is
+  used to initialize the coefficients of the returned polynomial from the least
+  significant (coefficient of X^0) to the most significant (coefficient of
+  X^1023) coefficient. For each of the 16-bit integers first eliminate the
+  highest two bits (to make it a 14-bit integer) and then use it as the next
+  coefficient if it is smaller than q=12289.
+  Note that the amount of output required from SHAKE to initialize all 1024
+  coefficients of the polynomial varies depending on the input seed.
+  Note further that this function does not process any secret data and thus does
+  not need any timing-attack protection.
+
+
+  sample_noise() first generates 4096 Bytes of uniformly random data. This can
+  be done by reading these bytes from the system's RNG; efficient
+  implementations will typically only read a 32-byte seed from the system's RNG
+  and expand it through some fast PRNG (for example, ChaCha20 or AES-256 in CTR
+  mode). The output of the PRG is considered an array of 2048 16-bit integers
+  r[0],...,r[2047]. The coefficients of the output polynomial are computed as
+  HW(r[0])-HW(r[1]), HW(r[2])-HW(r[3]),...,HW(r[2046])-HW(r[2047]), where HW
+  stands for Hamming weight.
+  Note that the choice of RNG is a local decision; different implementations are
+  free to use different RNGs.
+  Note further that the output of this function is secret; the PRG (and the
+  computation of HW) need to be protected against timing attacks.
+
+
+  NTT(poly f): For a mathematical description of NTT see the paper; a pseudocode
+  description of a very naive inplace transformation of an input polynomial f =
+  f[0] + f[1]*X + f[2]*X^2 + ... + f[1023]*X^1023 is the following code (all
+  arithmetic on coefficients performed modulo q):
+
+    psi   = 7
+    omega = 49
+
+    for i in range(0,n):
+      t[i] = f[i] * psi^i
+
+    for i in range(0,n):
+      f[i] = 0
+      for j in range(0,n):
+        f[i] += t[j] * omega^((i*j)%n)
+
+  Note that this is not how NTT should be implemented if performance is an
+  issue; in particular, efficient algorithms for the NTT take time O(n*log(n))
+  and not O(n^2)
+  Note further that all arithmetic in NTT has to be protected against timing
+  attacks.
+
+
+  INVNTT(poly f): For a mathematical description of INVNTT see the paper; a
+  pseudocode description of a very naive inplace transformation of an input
+  polynomial f = f[0] + f[1]*X + f[2]*X^2 + ... + f[1023]*X^1023 is the
+  following code (all arithmetic on coefficients performed modulo q):
+
+    invpsi = 8778;
+    invomega = 1254;
+    invn = 12277;
+
+    for i in range(0,n):
+      t[i] = f[i];
+
+    for i in range(0,n):
+      f[i]=0;
+      for j in range(0,n):
+        f[i] += t[j] * invomega^((i*j)%n)
+      f[i] *= invpsi^i
+      f[i] *= invn
+
+  Note that this is not how INVNTT should be implemented if performance is an
+  issue; in particular, efficient algorithms for the NTT take time O(n*log(n))
+  and not O(n^2)
+  Note further that all arithmetic in INVNTT has to be protected against timing
+  attacks.
+
+
+  pw(poly f, poly g) performs pointwise multiplication of the two polynomials.
+  This means that for f = (f0 + f1*X + f2*X^2 + ... + f1023*X^1023) and g = (g0
+  + g1*X + g2*X^2 + ... + g1023*X^1023) it computes and returns
+  h = (h0 + h1*X + h2*X^2 + ... + h1023*X^1023) with h0 = f0*g0, h1 = f1*g1,...,
+  h1023 = f1023*g1023.
+
+
+  pack(poly f) first reduces all coefficents of a modulo q, i.e., brings them to
+  the interval [0,q-1]. Denote these reduced coefficients as f0,..., f1023; note
+  that they all fit into 14 bits. The function then packs those coefficients
+  into an array of 1792 bytes r[0],..., r[1792] in "packed little-endian
+  representation", i.e.,
+  r[0]     = f[0] & 0xff;
+  r[1]     = (f[0] >>  8) & ((f[1] & 0x03) << 6)
+  r[2]     = (f[1] >>  2) & 0xff;
+  r[3]     = (f[1] >> 10) & ((f[2] & 0x0f) << 4)
+  .
+  .
+  .
+  r[1790]  = (f[1022]) >> 12) & ((f[1023] & 0x3f) << 2)
+  r[1791]  = f[1023] >> 6
+  Note that this function needs to be protected against timing attacks. In
+  particular, avoid non-constant-time conditional subtractions (or other
+  non-constant-time expressions) in the reduction modulo q of the coefficients.
+
+
+  unpack(NEWHOPE_POLY b) is the inverse of pack; it receives as input an array
+  of 1792 bytes and coverts it into the internal representation of a poly.
+  Note that unpack does not need to check whether the coefficients are reduced
+  modulo q or reduce coefficients modulo q.
+  Note further that the function must not leak any information about its inputs
+  through timing information, as it is also used to unpack the secret key of
+  Alice.
+
+
+  helprec(poly f) computes 256 bytes of reconciliation information from the
+  input poly f. Internally, one byte of reconciliation information is computed
+  from four coefficients of f by a function helprec4. Let the input polynomial f
+  = (f0 + f1*X + f2*X^2 + ... + f1023*X^1023); let the output byte array be
+  r[0],...r[256]. This output byte array is computed as
+  r[0]   = helprec4(f0,f256,f512,f768)
+  r[1]   = helprec4(f1,f257,f513,f769)
+  r[2]   = helprec4(f2,f258,f514,f770)
+  .
+  .
+  .
+  r[255] = helprec4(f255,f511,f767,f1023), where helprec4 does the following:
+
+    helprec4(x0,x1,x2,x3):
+      b = randombit()
+      r0,r1,r2,r3 = CVPD4(8*x0+4*b,8*x1+4*b,8*x2+4*b,8*x3+4*b)
+      r = (r0 & 0x03) | ((r1 & 0x03) << 2) | ((r2 & 0x03) << 4) | ((r3 & 0x03) << 6)
+      return r
+
+  The function CVPD4 does the following:
+
+    CVPD4(y0,y1,y2,y3):
+      v00 = round(y0/2q)
+      v01 = round(y1/2q)
+      v02 = round(y2/2q)
+      v03 = round(y3/2q)
+      v10 = round((y0-1)/2q)
+      v11 = round((y1-1)/2q)
+      v12 = round((y2-1)/2q)
+      v13 = round((y3-1)/2q)
+      t   = abs(y0 - 2q*v00)
+      t  += abs(y1 - 2q*v01)
+      t  += abs(y2 - 2q*v02)
+      t  += abs(y3 - 2q*v03)
+      if(t < 2q):
+        v0 = v00
+        v1 = v01
+        v2 = v02
+        v3 = v03
+        k  = 0
+      else
+        v0 = v10
+        v1 = v11
+        v2 = v12
+        v3 = v13
+        r  = 1
+      return (v0-v3,v1-v3,v2-v3,k+2*v3)
+
+  In this description, round() returns the closest integer and abs() returns the
+  absolute value.
+  Note that all computations involved in helprec operate on secret data and must
+  be protected against timing attacks.
+
+
+  rec(poly f, NEWHOPE_REC r) computes the pre-hash (see paper) Newhope key from
+  f and r. Specifically, it computes one bit of key from 4 coefficients of f and
+  one byte of r. Let f = f0 + f1*X + f2*X^2 + ... + f1023*X^1023 and let r =
+  r[0],r[1],...,r[255]. Let the bytes of the output by k[0],...,k[31] and let
+  the bits of the output by k0,...,k255, where
+  k0   = k[0] & 0x01
+  k1   = (k[0] >> 1) & 0x01
+  k2   = (k[0] >> 2) & 0x01
+  .
+  .
+  .
+  k8   = k[1] & 0x01
+  k9   = (k[1] >> 1) & 0x01
+  .
+  .
+  .
+  k255 = (k[32] >> 7)
+  The function rec computes k0,...,k255 as
+  k0   = rec4(f0,f256,f512,f768,r[0])
+  k1   = rec4(f1,f257,f513,f769,r[1])
+  .
+  .
+  .
+  k255 = rec4(f255,f511,f767,f1023,r[255])
+
+  The function rec4 does the following:
+
+    rec4(y0,y1,y2,y3,r):
+      r0 = r & 0x03
+      r1 = (r >> 2) & 0x03
+      r2 = (r >> 4) & 0x03
+      r3 = (r >> 6) & 0x03
+      Decode(8*y0-2q*r0, 8*y1-2q*r1, 8*y2-2q*r2, 8*y3-q*r3)
+
+  The function Decode does the following:
+
+    Decode(v0,v1,v2,v3):
+      t0 = round(v0/8q)
+      t1 = round(v1/8q)
+      t2 = round(v2/8q)
+      t3 = round(v3/8q)
+      t  = abs(v0 - 8q*t0)
+      t += abs(v0 - 8q*t0)
+      t += abs(v0 - 8q*t0)
+      t += abs(v0 - 8q*t0)
+      if(t > 1) return 1
+      else return 0
+
+
+
+
+  --- Testvectors ---
+
+
+
+
+  When a client uses a SEND_A within a CREATE2V cell, the client SHOULD NOT use
+  that SEND_A in any other CREATE2V or EXTEND2 cells.
 
 
 §3.2.3. Cell Formats
 
-
 §3.2.3.1. CREATE2V Cells
 
-   The client portion of the handshake should send CLIENT_HDATA, formatted
-   into a CREATE2V cell, where the latter is fragmented into four EXTEND2
-   cells as follows:
+  The client portion of the handshake should send CLIENT_HDATA, formatted
+  into a CREATE2V cell as follows:
 
+    CREATE2V {                                              [2114 bytes]
+      HTYPE   := 0x0003                                     [2 bytes]
+      HLEN    := 0x0780                                     [2 bytes]
+      HDATA   := CLIENT_HDATA                               [1920 bytes]
+      IGNORED := 0x00                                       [194 bytes]
+    }
 
-      IGNORED := 0x00                                       [100 bytes]
-
-    XXX i think we want an extendable CREATE2V from OPs? then OR-to-OR EXTEND2s?
-    XXXXisis
-
+  [XXX do we really want to pad with IGNORED to make CLIENT_HDATA the
+  same number of bytes as SERVER_HDATA? --isis]
 
 §3.2.3.2. CREATED2V Cells
 
+  The server responds to the client's CREATE2V cell with SERVER_HDATA,
+  formatted into a CREATED2V cell as follows:
+
+    CREATED2V {                                             [2114 bytes]
+      HLEN    := 0x0800                                     [2 bytes]
+      HDATA   := SERVER_HDATA                               [2112 bytes]
+      IGNORED := 0x00                                       [0 bytes]
+    }
 
 §3.2.3.3. Fragmented EXTEND2 Cells
 
@@ -317,9 +560,14 @@ Depends: prop#220 prop#249
       NSPEC := 0x00                                       [1 byte]
       HTYPE := 0xFFFF                                     [2 bytes]
       HLEN  := 0x0000                                     [2 bytes]
-      HDATA := CLIENT_HDATA[1448,1919]                    [472 bytes]
+      HDATA := CLIENT_HDATA[1448,1919] || 0x00[20]        [492 bytes]
     }
-
+    EXTEND2 {
+      NSPEC := 0x00                                       [1 byte]
+      HTYPE := 0xFFFF                                     [2 bytes]
+      HLEN  := 0x0000                                     [2 bytes]
+      HDATA := 0x00[172]                                  [172 bytes]
+    }
 
   The client sends this to the server to extend the circuit from, and that
   server should format the fragmented EXTEND2 cells into a CREATE2V cell, as
@@ -327,13 +575,60 @@ Depends: prop#220 prop#249
 
 §3.2.3.4. Fragmented EXTENDED2 Cells
 
+    EXTENDED2 {
+      NSPEC := 0x02 {                                     [1 byte]
+        LINK_ID_SERVER                                    [22 bytes] XXX
+        LINK_ADDRESS_SERVER                               [8 bytes]  XXX
+      }
+      HTYPE := 0x0003                                     [2 bytes]
+      HLEN  := 0x0800                                     [2 bytes]
+      HDATA := SERVER_HDATA[0,461]                        [462 bytes]
+    }
+    EXTENDED2 {
+      NSPEC := 0x00                                       [1 byte]
+      HTYPE := 0xFFFF                                     [2 bytes]
+      HLEN  := 0x0000                                     [2 bytes]
+      HDATA := SERVER_HDATA[462,954]                      [492 bytes]
+    }
+    EXTEND2 {
+      NSPEC := 0x00                                       [1 byte]
+      HTYPE := 0xFFFF                                     [2 bytes]
+      HLEN  := 0x0000                                     [2 bytes]
+      HDATA := SERVER_HDATA[955,1447]                     [492 bytes]
+    }
+    EXTEND2 {
+      NSPEC := 0x00                                       [1 byte]
+      HTYPE := 0xFFFF                                     [2 bytes]
+      HLEN  := 0x0000                                     [2 bytes]
+      HDATA := SERVER_HDATA[1448,1939]                    [492 bytes]
+    }
+    EXTEND2 {
+      NSPEC := 0x00                                       [1 byte]
+      HTYPE := 0xFFFF                                     [2 bytes]
+      HLEN  := 0x0000                                     [2 bytes]
+      HDATA := SERVER_HDATA[1940,2112]                    [172 bytes]
+    }
 
-3.2.x. Key Expansion
+
+§3.3. Key Expansion
 
   The client and server derive a shared key by:
 
-    SHAKE_128(NewHopeKey || NTorKey)
+    SHAKE_256("NOT THE DROIDS YOURE LOOKING FOR" || NTorKey || NewHopeKey)
 
+
+§3.3.1. Note on the Design Choice
+
+  The reader may wonder why one would use SHAKE-256 to produce a 256-bit
+  output, since the security strength in bits for SHAKE-256 is min(d/2,256)
+  for collision resistance and min(d,256) for first- and second-order
+  preimages, where d is the output length.
+
+  The reasoning is that we should be aiming for 256-bit security for all of
+  our symmetric cryptography.  One could then argue that we should just use
+  SHA3-256 for the KDF.  We choose SHAKE-256 instead in order to provide an
+  easy way to derive longer shared secrets in the future without requiring a
+  new handshake.  The construction is odd, but the future is bright.
 
 
 4. Security & Anonymity Implications
