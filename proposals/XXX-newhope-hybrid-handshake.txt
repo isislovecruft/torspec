@@ -2,20 +2,20 @@ Filename: XXX-newhope-hybrid-handshake.txt
 Title: Post-Quantum Secure Hybrid Handshake Based on NewHope
 Author: Isis Lovecruft, Peter Schwabe
 Created: 16 Apr 2016
-Updated: 3 May 2016
+Updated: 4 May 2016
 Status: Draft
 Depends: prop#220 prop#249 prop#264
 
 §0. Introduction
 
-  NewHope is a post-quantum secure key exchange lattice-based protocol based
+  NewHope is a post-quantum-secure lattice-based key-exchange protocol based
   on the ring-learning-with-errors (Ring-LWE) problem.  We propose a hybrid
   handshake for Tor, based on a combination of Tor's current NTor handshake
   and a shared key derived through a NewHope ephemeral key exchange.
 
   For further details on the NewHope key exchange, the reader is referred to
   "Post-quantum key exchange - a new hope" by Alkim, Ducas, Pöppelmann, and
-  Schwabe. [0][1]
+  Schwabe [0][1].
 
   For the purposes of brevity, we consider that NTor is currently the only
   handshake protocol in Tor; the older TAP protocol is ignored completely, due
@@ -29,12 +29,17 @@ Depends: prop#220 prop#249 prop#264
   be able to break Tor's current handshake protocol and decrypt previous
   communications.
 
-  [XXX maybe write some more high-scare-factor cruft here. --isis]
+  It is unclear if and when such attackers equipped with large quantum
+  computers will exist, but various estimates by researchers in quantum
+  physics and quantum engineering give estimates of only 1 to 2 decades.
+  Clearly, the security requirements of many Tor users include secrecy of
+  their messages beyond this time span, which means that Tor needs to update
+  the key exchange to protect against such attackers as soon as possible.
 
 
 §2. Design
 
-  An initiator and responder, in parallel, conduct do two hanshakes:
+  An initiator and responder, in parallel, conduct two handshakes:
 
   - An X25519 key exchange, as described in the description of the NTor
     handshake in Tor proposal #216.
@@ -42,7 +47,10 @@ Depends: prop#220 prop#249 prop#264
 
   The shared keys derived from these two handshakes are then concatenated and
   used as input to the SHAKE-256 extendable output function (XOF), as decribed
-  in FIPS-PUB-202, [2] in order to produce a shared key.
+  in FIPS-PUB-202 [2], in order to produce a shared key of the desired length.
+  The testvectors in §C assume that this key has a length of 32 bytes, but the
+  use of a XOF allows arbitrary lengths to easily support future updates of
+  the symmetric primitives using the key. See also §3.3.1.
 
 
 §3. Specification
@@ -51,22 +59,23 @@ Depends: prop#220 prop#249 prop#264
 
   Let `a || b` be the concatenation of a with b.
 
-  Let `a ^ b` denote the exponentiation of a to the bth power.
+  Let `a^b` denote the exponentiation of a to the bth power.
 
   Let `a == b` denote the equality of a with b, and vice versa.
 
   Let `a := b` be the assignment of the value of b to the variable a.
 
-  Let `H(x)` be the 32-byte output of the SHA3-256 hash digest function (as
-  described in FIPS-PUB-202) applied to message x.
+  Let `H(x)` be 32-bytes of output of the SHAKE-256 XOF (as described in
+  FIPS-PUB-202) applied to message x.
 
   Let X25519 refer to the curve25519-based key agreement protocol described
   in RFC7748 §6.1. [3]
 
-  Let `EXP(a, b) == X25519(., b, a)` with `g == 9`.  Let X25519_KEYGEN() do
+  Let `EXP(a, b) == X25519(., b, a)` with `g == 9`. Let X25519_KEYGEN() do
   the appropriate manipulations when generating the secret key (clearing the
   low bits, twidding the high bits).
-  [XXX maybe match RFC7748 notation more. --isis]
+
+  [XXX match RFC7748 notation more. --isis]
 
   Let `X25519_KEYID(B) == B` where B is a valid X25519 public key.
 
@@ -76,10 +85,10 @@ Depends: prop#220 prop#249 prop#264
 
   Let `ID` be a router's identity key taken from the router microdescriptor.
   In the case for relays possessing Ed25519 identity keys (c.f. Tor proposal
-  #220), this is a 32-byte string reprsenting the public Ed25519 identity key.
+  #220), this is a 32-byte string representing the public Ed25519 identity key.
   For backwards and forwards compatibility with routers which do not possess
   Ed25519 identity keys, this is a 32-byte string created via the output of
-  SHA3-256(X), where the message X is the router's public identity key.
+  H(ID).
 
   We refer to the router as the handshake "responder", and the client (which
   may be an OR or an OP) as the "initiator".
@@ -89,7 +98,7 @@ Depends: prop#220 prop#249 prop#264
   H_LENGTH       [32 bytes]
   G_LENGTH       [32 bytes]
 
-  PROTOID  :=    "pqtor-x25519-newhope-sha3256-1"
+  PROTOID  :=    "pqtor-x25519-newhope-shake256-1"
   T_MAC    :=    PROTOID || ":mac"
   T_KEY    :=    PROTOID || ":key_extract"
   T_VERIFY :=    PROTOID || ":verify"
@@ -211,13 +220,17 @@ Depends: prop#220 prop#249 prop#264
 
   Both parties check that none of the EXP() operations produced the point at
   infinity. [NOTE: This is an adequate replacement for checking Y for group
-  membership, if the group is curve25519.]
+  membership, if the group is Curve25519.]
+
+  [XXX: This doesn't sound exactly right. You need the scalar tweaking of
+  X25519 for this to work and also, the point at infinity is obviously an
+  element of the group --isis, peter]
 
   Both parties now have a shared value for NTOR_KEY.  They expand this into
   the keys needed for the Tor relay protocol.
 
-  [XXX I think we want to omit the final hashing in the production of NTOR_KEY
-  here, and instead put all the inputs through SHAKE-256. --isis]
+  [XXX We think we want to omit the final hashing in the production of NTOR_KEY
+  here, and instead put all the inputs through SHAKE-256. --isis, peter]
 
   [XXX We probably want to remove ID and B from the input to the shared key
   material, since they serve for authentication but, as pre-established
@@ -234,14 +247,8 @@ Depends: prop#220 prop#249 prop#264
   Let ℤ be the ring of rational integers. Let ℤq, for q ≥ 1, denote the quotient
   ring ℤ/qℤ.  We define R = ℤ[X]/((X^n)+1) as the ring of integer polynomials
   modulo ((X^n)+1), and Rq = ℤq[X]/((X^n)+1) as the ring of integer polynomials
-  modulo ((X^n)+1) where each coefficient is reduced modulo q.  When we refer to
+  modulo ((X^n)+1) where each coefficient is reduced modulo q. When we refer to
   a polynomial, we mean an element of Rq.
-
-  Let n be the dimensionality of the D4 lattice, and therefore the degree of a
-  polynomial used to represent it.  NewHope uses a "q-ary" lattice, where q is
-  within the ring of natural integers, ℤN.  The modulus q is used to determine
-  whether a vector of polynomial coefficents is a member of the lattice L.
-  Thus, the lattice L is taken as satisfying qℤn ⊆ L ⊆ ℤn.
 
     n := 1024
     q := 12289
@@ -260,32 +267,35 @@ Depends: prop#220 prop#249 prop#264
   For a description of internal functions, see §B.
 
     (NEWHOPE_POLY, NEWHOPE_MSGA) ← NEWHOPE_KEYGEN(SEED):
-        a    := gen_a(seed)
-        s    := sample_noise()
-        e    := sample_noise()
-        st   := ntt(s)
-        bt   := pw(a, s) + NTT(e)
-        sbt  := pack(bt)
-        return (pack(ts), sbt || seed)
+        â    := gen_a(seed)
+        s    := poly_getnoise()
+        e    := poly_getnoise()
+        ŝ    := poly_ntt(s)
+        ê    := poly_ntt(e)
+        b̂    := pointwise(â, ŝ) + ê
+        sp   := poly_tobytes(ŝ)
+        bp   := poly_tobytes(b̂)
+        return (sp, (bp || seed))
 
     (NEWHOPE_MSGB, NEWHOPE_KEY) ← NEWHOPE_SHAREDB(NEWHOPE_MSGA):
-        s'   := sample_noise()
-        e'   := sample_noise()
-        e"   := sample_noise()
-        bt   := unpack(sbt)
-        a    := gen_a(seed)
-        ts'  := ntt(s')
-        tu   := pw(a, ts') + ntt(e')
-        v    := invntt(pw(bt, ts')) + e"
+        s'   := poly_getnoise()
+        e'   := poly_getnoise()
+        e"   := poly_getnoise()
+        b̂    := poly_frombytes(bp)
+        â    := gen_a(seed)
+        ŝ'   := poly_ntt(s')
+        ê'   := poly_ntt(e')
+        û    := poly_pointwise(â, ŝ') + ê'
+        v    := poly_invntt(poly_pointwise(b̂,ŝ')) + e"
         r    := helprec(v)
+        up   := poly_tobytes(û)
         k    := rec(v, r)
-        stu  := pack(tu)
-        return (stu || r, k)
+        return ((up || r), k)
 
     NEWHOPE_KEY ← NEWHOPE_SHAREDA(NEWHOPE_MSGB, NEWHOPE_POLY):
-        tu   := unpack(stu)
-        ts   := unpack(p)
-        v'   := invntt(pw(tu, ts))
+        û    := poly_frombytes(up)
+        ŝ    := poly_frombytes(sp)
+        v'   := poly_invntt(poly_pointwise(û, ŝ))
         k    := rec(v', r)
         return k
 
@@ -314,6 +324,13 @@ Depends: prop#220 prop#249 prop#264
   SHA3-256 for the KDF.  We choose SHAKE-256 instead in order to provide an
   easy way to derive longer shared secrets in the future without requiring a
   new handshake.  The construction is odd, but the future is bright.
+  As we are already using SHAKE-256 for the 32-byte output hash, we are also
+  using it for all other 32-byte hashes involved in the protocol. Note that
+  the only difference between SHA3-256 and SHAKE-256 with 32-byte output is
+  one domain-separation byte.
+
+  [XXX why would you want 256-bit security for the symmetric side? Are you
+  talking pre- or post-quantum security? --peter]
 
 
 §4. Security & Anonymity Implications
@@ -323,10 +340,11 @@ Depends: prop#220 prop#249 prop#264
 
   The client MUST NOT cache and reuse SEED.  Doing so gives non-trivial
   adversarial advantages w.r.t. all-for-the-price-of-one attacks during the
-  caching period.  Additionally, if the SEED used to generate NEWHOPE_MSGA is
-  reused along for handshakes along the same circuit or multiple different
+  caching period.  More importantly, if the SEED used to generate NEWHOPE_MSGA
+  is reused for handshakes along the same circuit or multiple different
   circuits, an adversary conducting a sybil attack somewhere along the path(s)
-  will be able to correlate the identity of the client across circuits or hops.
+  will be able to correlate the identity of the client across circuits or
+  hops.
 
 
 §5. Compatibility
@@ -359,23 +377,53 @@ Depends: prop#220 prop#249 prop#264
 
 §6. Implementation
 
+  The paper by Alkim, Ducas, Pöppelmann and Schwabe describes two software
+  implementations of NewHope, one C reference implementation and an optimized
+  implementation using AVX2 vector instructions. Those implementations are
+  available at [1].
+
+  Additionally, there are implementations in Go by Yawning Angel, available
+  from [4] and in Rust by Isis Lovecruft, available from [5].
+
+  The software used to generate the test vectors in §C is based on the C
+  reference implementation and available from:
+
+  https://code.ciph.re/isis/newhope-tor-testvectors
+  https://github.com/isislovecruft/newhope-tor-testvectors
 
 
 §7. Performance & Scalability
 
-  [XXX implement with the newhope refc code and take benchmarks for
-  inclusion. -isis]
+  The computationally expensive part in the current NTor handshake is the
+  X25519 key-pair generation and the X25519 shared-key computation. The
+  current implementation in Tor is a wrapper to support various highly optimized
+  implementations on different architectures. On Intel Haswell processors, the
+  fastest implementation of X25519, as reported by the eBACS benchmarking
+  project [6], takes 169920 cycles for key-pair generation and 161648 cycles
+  for shared-key computation; these add up to a total of 331568 cycles on each
+  side (initiator and responder).
+
+  The C reference implementation of NewHope, also benchmarked on Intel
+  Haswell, takes 358234 cycles for the initiator and 402058 cycles for the
+  Responder. The core computation of the proposed combination of NewHope and
+  X25519 will thus mean a slowdown of about a factor of 2.1 for the Initiator
+  and a slowdown by a factor of 2.2 for the Responder compared to the current
+  NTor handshake. These numbers assume a fully optimized implementation of the
+  NTor handshake and a C reference implementation of NewHope. With optimized
+  implementations of NewHope, such as the one for Intel Haswell described in
+  [0], the computational slowdown will be considerably smaller than a factor
+  of 2.
 
 
-§8. Test Vectors
-
-
-§9. References
+§8. References
 
 [0]: https://cryptojedi.org/papers/newhope-20160328.pdf
 [1]: https://cryptojedi.org/crypto/#newhope
 [2]: http://www.nist.gov/customcf/get_pdf.cfm?pub_id=919061
 [3]: https://tools.ietf.org/html/rfc7748#section-6.1
+[4]: https://github.com/Yawning/newhope
+[5]: https://code.ciph.re/isis/newhopers
+[6]: http://bench.cr.yp.to
 
 
 §A. Cell Formats
@@ -488,21 +536,21 @@ Depends: prop#220 prop#249 prop#264
 
 §B. NewHope Internal Functions
 
-  gen_a(SEED):    returns a uniformly random poly
-  sample_noise():         returns a poly (sampled from a centered binomial)
-  ntt(poly):              number-theoretic transform; returns a poly
-  invntt(poly):           inverse number-theoretic transform; returns a poly
-  pw(poly, poly):         pointwise multiplication; returns a poly
-  pack(poly):             packs a poly to a NEWHOPE_POLY byte array
-  unpack(NEWHOPE_POLY):   unpacks a NEWHOPE_POLY byte array to a poly
+  gen_a(SEED):                  returns a uniformly random poly
+  poly_getnoise():              returns a poly sampled from a centered binomial
+  poly_ntt(poly):               number-theoretic transform; returns a poly
+  poly_invntt(poly):            inverse number-theoretic transform; returns a poly
+  poly_pointwise(poly, poly):   pointwise multiplication; returns a poly
+  poly_tobytes(poly):           packs a poly to a NEWHOPE_POLY byte array
+  poly_frombytes(NEWHOPE_POLY): unpacks a NEWHOPE_POLY byte array to a poly
 
-  helprec(poly):          returns a NEWHOPE_REC byte array
-  rec(poly, NEWHOPE_REC): returns a NEWHOPE_KEY
+  helprec(poly):                returns a NEWHOPE_REC byte array
+  rec(poly, NEWHOPE_REC):       returns a NEWHOPE_KEY
 
 
   --- Description of the Newhope internal functions ---
 
-  gen_a(SEED seed) receives as input a 32-bit (public) seed.  It expands
+  gen_a(SEED seed) receives as input a 32-byte (public) seed.  It expands
   this seed through SHAKE-128 from the FIPS202 standard. The output of SHAKE-128
   is considered a sequence of 16-bit little-endian integers. This sequence is
   used to initialize the coefficients of the returned polynomial from the least
@@ -515,9 +563,8 @@ Depends: prop#220 prop#249 prop#264
   Note further that this function does not process any secret data and thus does
   not need any timing-attack protection.
 
-  [XXX I think we meant that gen_a() takes as input a 32-*byte* seed. --isis]
 
-  sample_noise() first generates 4096 Bytes of uniformly random data. This can
+  poly_getnoise() first generates 4096 Bytes of uniformly random data. This can
   be done by reading these bytes from the system's RNG; efficient
   implementations will typically only read a 32-byte seed from the system's RNG
   and expand it through some fast PRNG (for example, ChaCha20 or AES-256 in CTR
@@ -531,10 +578,10 @@ Depends: prop#220 prop#249 prop#264
   computation of HW) need to be protected against timing attacks.
 
 
-  NTT(poly f): For a mathematical description of NTT see the paper; a pseudocode
-  description of a very naive inplace transformation of an input polynomial f =
-  f[0] + f[1]*X + f[2]*X^2 + ... + f[1023]*X^1023 is the following code (all
-  arithmetic on coefficients performed modulo q):
+  poly_ntt(poly f): For a mathematical description of poly_ntt see the [0]; a
+  pseudocode description of a very naive inplace transformation of an input
+  polynomial f = f[0] + f[1]*X + f[2]*X^2 + ... + f[1023]*X^1023 is the
+  following code (all arithmetic on coefficients performed modulo q):
 
     psi   = 7
     omega = 49
@@ -547,16 +594,16 @@ Depends: prop#220 prop#249 prop#264
       for j in range(0,n):
         f[i] += t[j] * omega^((i*j)%n)
 
-  Note that this is not how NTT should be implemented if performance is an
-  issue; in particular, efficient algorithms for the NTT take time O(n*log(n))
-  and not O(n^2)
-  Note further that all arithmetic in NTT has to be protected against timing
-  attacks.
+  Note that this is not how poly_ntt should be implemented if performance is
+  an issue; in particular, efficient algorithms for the number-theoretic
+  transform take time O(n*log(n)) and not O(n^2)
+  Note further that all arithmetic in poly_ntt has to be protected against
+  timing attacks.
 
 
-  INVNTT(poly f): For a mathematical description of INVNTT see the paper; a
-  pseudocode description of a very naive inplace transformation of an input
-  polynomial f = f[0] + f[1]*X + f[2]*X^2 + ... + f[1023]*X^1023 is the
+  poly_invntt(poly f): For a mathematical description of poly_invntt see the
+  [0]; a pseudocode description of a very naive inplace transformation of an
+  input polynomial f = f[0] + f[1]*X + f[2]*X^2 + ... + f[1023]*X^1023 is the
   following code (all arithmetic on coefficients performed modulo q):
 
     invpsi = 8778;
@@ -573,25 +620,25 @@ Depends: prop#220 prop#249 prop#264
       f[i] *= invpsi^i
       f[i] *= invn
 
-  Note that this is not how INVNTT should be implemented if performance is an
-  issue; in particular, efficient algorithms for the NTT take time O(n*log(n))
-  and not O(n^2)
-  Note further that all arithmetic in INVNTT has to be protected against timing
-  attacks.
+  Note that this is not how poly_invntt should be implemented if performance
+  is an issue; in particular, efficient algorithms for the inverse
+  number-theoretic transform take time O(n*log(n)) and not O(n^2)
+  Note further that all arithmetic in poly_invntt has to be protected against
+  timing attacks.
 
 
-  pw(poly f, poly g) performs pointwise multiplication of the two polynomials.
-  This means that for f = (f0 + f1*X + f2*X^2 + ... + f1023*X^1023) and g = (g0
-  + g1*X + g2*X^2 + ... + g1023*X^1023) it computes and returns
-  h = (h0 + h1*X + h2*X^2 + ... + h1023*X^1023) with h0 = f0*g0, h1 = f1*g1,...,
-  h1023 = f1023*g1023.
+  poly_pointwise(poly f, poly g) performs pointwise multiplication of the two
+  polynomials.  This means that for f = (f0 + f1*X + f2*X^2 + ... +
+  f1023*X^1023) and g = (g0 + g1*X + g2*X^2 + ... + g1023*X^1023) it computes
+  and returns h = (h0 + h1*X + h2*X^2 + ... + h1023*X^1023) with h0 = f0*g0,
+  h1 = f1*g1,..., h1023 = f1023*g1023.
 
 
-  pack(poly f) first reduces all coefficents of a modulo q, i.e., brings them to
-  the interval [0,q-1]. Denote these reduced coefficients as f0,..., f1023; note
-  that they all fit into 14 bits. The function then packs those coefficients
-  into an array of 1792 bytes r[0],..., r[1792] in "packed little-endian
-  representation", i.e.,
+  poly_tobytes(poly f) first reduces all coefficents of f modulo q, i.e.,
+  brings them to the interval [0,q-1]. Denote these reduced coefficients as
+  f0,..., f1023; note that they all fit into 14 bits. The function then packs
+  those coefficients into an array of 1792 bytes r[0],..., r[1792] in "packed
+  little-endian representation", i.e.,
   r[0]     = f[0] & 0xff;
   r[1]     = (f[0] >>  8) & ((f[1] & 0x03) << 6)
   r[2]     = (f[1] >>  2) & 0xff;
@@ -606,13 +653,13 @@ Depends: prop#220 prop#249 prop#264
   non-constant-time expressions) in the reduction modulo q of the coefficients.
 
 
-  unpack(NEWHOPE_POLY b) is the inverse of pack; it receives as input an array
-  of 1792 bytes and coverts it into the internal representation of a poly.
-  Note that unpack does not need to check whether the coefficients are reduced
-  modulo q or reduce coefficients modulo q.
-  Note further that the function must not leak any information about its inputs
-  through timing information, as it is also used to unpack the secret key of
-  Alice.
+  poly_frombytes(NEWHOPE_POLY b) is the inverse of poly_tobytes; it receives
+  as input an array of 1792 bytes and coverts it into the internal
+  representation of a poly. Note that poly_frombytes does not need to check
+  whether the coefficients are reduced modulo q or reduce coefficients modulo
+  q. Note further that the function must not leak any information about its
+  inputs through timing information, as it is also applied to the secret key
+  of the initiator.
 
 
   helprec(poly f) computes 256 bytes of reconciliation information from the
@@ -716,3 +763,6 @@ Depends: prop#220 prop#249 prop#264
       t += abs(v0 - 8q*t0)
       if(t > 1) return 1
       else return 0
+
+
+§C. Test Vectors
