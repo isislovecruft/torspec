@@ -3069,6 +3069,14 @@
   It will remain in this phase until it receives the CREATED_FAST cell
   back, indicating that the circuit is ready.
 
+  Phase 18:
+  tag=requesting_bridge_desc summary="Asking for bridge descriptors"
+
+  If an OP is configured to use bridges, this stage signals to the
+  controller that Tor is fetching any required bridge descriptors, so
+  that it can later use those bridges in one-hop circuits for fetching
+  the networkstatus consensus.
+
   Phase 20:
   tag=requesting_status summary="Asking for networkstatus consensus"
 
